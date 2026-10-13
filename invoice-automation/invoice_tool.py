@@ -113,6 +113,9 @@ def vendors(cfg):
             "senders": senders,
             "keyword": s.get("件名キーワード", "").strip(),
             "pdf_password": s.get("PDFパスワード", "").strip(),
+            "site": s.get("サイト", "").strip().lower(),
+            "login_id": s.get("ログインID", "").strip(),
+            "login_password": s.get("ログインパスワード", "").strip(),
         })
     return result
 
@@ -151,6 +154,7 @@ def collect(cfg, state):
 
     processed = set(state["processed"])
     saved = 0
+    site_jobs = {}  # 取引先名 -> [(請求書番号, 発行日, 処理済みキー)]
     imap = imaplib.IMAP4_SSL(IMAP_HOST, 993, ssl_context=ssl.create_default_context())
     try:
         imap.login(user, password)
@@ -169,7 +173,7 @@ def collect(cfg, state):
                         continue
                     msg = email.message_from_bytes(raw, policy=email.policy.default)
                     msg_id = (msg.get("Message-ID") or f"{sender}-{num.decode()}").strip()
-                    key = f"{v['name']}|{msg_id}"
+                    key = f"{v['name']}|{'site|' if v['site'] else ''}{msg_id}"
                     if key in processed:
                         continue
                     from_addr = parseaddr(str(msg.get("From", "")))[1].lower()
@@ -183,6 +187,18 @@ def collect(cfg, state):
                         date = email.utils.parsedate_to_datetime(msg["Date"]).date()
                     except Exception:
                         date = dt.date.today()
+
+                    if v["site"]:
+                        # 添付なし：件名から請求書番号を読み取り、あとでサイトからダウンロードする
+                        m = re.search(r"(\d{4,})\s*[:：]", subject)
+                        if not m:
+                            log(f"※件名から請求書番号を読み取れませんでした: {v['name']}／{subject}")
+                            continue
+                        dm = re.search(r"\[(\d{4})/(\d{1,2})/(\d{1,2})\]", subject)
+                        if dm:
+                            date = dt.date(*map(int, dm.groups()))
+                        site_jobs.setdefault(v["name"], []).append((m.group(1), date, key))
+                        continue
 
                     count = 0
                     for part in msg.iter_attachments():
@@ -207,9 +223,136 @@ def collect(cfg, state):
             imap.logout()
         except Exception:
             pass
+
+    for v in vlist:
+        jobs = site_jobs.get(v["name"])
+        if not jobs:
+            continue
+        done = download_from_site(v, jobs, pending)
+        saved += len(done)
+        state["processed"].extend(done)
     save_state(state)
     log(f"受信チェック完了: 新しく保存したファイル {saved} 件")
     return saved
+
+
+# ---------------------------------------------------------------- サイトからのダウンロード
+SHOW_BROWSER = False  # --show-browser を付けると、ブラウザの動きが画面に表示されます
+
+
+def open_browser(pw):
+    """パソコンに入っている Edge（なければ Chrome）を使う。"""
+    for channel in ("msedge", "chrome", None):
+        try:
+            kw = {"channel": channel} if channel else {}
+            return pw.chromium.launch(headless=not SHOW_BROWSER, **kw)
+        except Exception:
+            continue
+    raise RuntimeError("Edge も Chrome も起動できませんでした")
+
+
+def click_and_download(ctx, page, target, out):
+    """ボタンを押して、ダウンロード（または新しいタブで開いたPDF）を保存する。"""
+    got = []
+
+    def on_download(d):
+        got.append(d)
+
+    def hook(p):
+        p.on("download", on_download)
+
+    for p in ctx.pages:
+        hook(p)
+    ctx.on("page", hook)
+    before = len(ctx.pages)
+    target.click()
+    for _ in range(60):
+        if got:
+            break
+        page.wait_for_timeout(500)
+    ctx.remove_listener("page", hook)
+    if got:
+        got[0].save_as(out)
+    elif len(ctx.pages) > before:  # PDFが新しいタブで表示された場合
+        url = ctx.pages[-1].url
+        resp = ctx.request.get(url)
+        if not resp.ok or not resp.body().startswith(b"%PDF"):
+            raise RuntimeError("PDFを取得できませんでした")
+        out.write_bytes(resp.body())
+        ctx.pages[-1].close()
+    else:
+        raise RuntimeError("ダウンロードが始まりませんでした")
+
+
+def fill_field(page, label, fallback_css, value):
+    field = page.get_by_label(label, exact=True)
+    if field.count() != 1:
+        field = page.locator(fallback_css).first
+    field.fill(value)
+
+
+MEIRAKU_LOGIN_URL = "https://meiraku-invoice.jp/customer/customer-users/login"
+
+
+def download_meiraku(page, ctx, v, jobs, pending, done):
+    """スジャータめいらく請求書システム（meiraku-invoice.jp）"""
+    page.goto(MEIRAKU_LOGIN_URL)
+    fill_field(page, "ログインID", "input[type=text], input[type=email], input:not([type])", v["login_id"])
+    fill_field(page, "パスワード", "input[type=password]", v["login_password"])
+    page.get_by_role("button", name="ログイン", exact=True).click()
+    page.wait_for_load_state("networkidle")
+    if "login" in page.url:
+        raise RuntimeError("ログインできませんでした。ログインID／ログインパスワードを確認してください")
+
+    for number, date, key in jobs:
+        row = page.locator("tr", has_text=number)
+        if row.count() == 0:
+            # 一覧に見当たらなければ、請求書番号で検索する
+            fill_field(page, "請求書番号", "input[type=text]", number)
+            page.get_by_role("button", name="検索", exact=True).click()
+            page.wait_for_load_state("networkidle")
+            row = page.locator("tr", has_text=number)
+        if row.count() == 0:
+            log(f"※{v['name']}: 請求書番号 {number} が一覧に見つかりませんでした")
+            continue
+        button = row.first.locator("a, button", has_text="PDF").first
+        out = unique_path(pending / safe_name(f"{date:%Y-%m-%d}_{v['name']}_請求書{number}.pdf"))
+        click_and_download(ctx, page, button, out)
+        log(f"保存: {out.name}（サイトからダウンロード）")
+        done.append(key)
+
+
+SITES = {"meiraku": download_meiraku}
+
+
+def download_from_site(v, jobs, pending):
+    """サイトにログインして請求書をダウンロード。成功した分の処理済みキーを返す。"""
+    func = SITES.get(v["site"])
+    if func is None:
+        log(f"※{v['name']}: サイト = {v['site']} には対応していません")
+        return []
+    if not v["login_id"] or not v["login_password"]:
+        log(f"※{v['name']}: ログインID／ログインパスワードが config.ini にありません")
+        return []
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log(f"※{v['name']}: playwright が未インストールのため、サイトからのダウンロードができません")
+        return []
+    done = []
+    try:
+        with sync_playwright() as pw:
+            browser = open_browser(pw)
+            try:
+                ctx = browser.new_context(accept_downloads=True)
+                func(ctx.new_page(), ctx, v, jobs, pending, done)
+            finally:
+                browser.close()
+    except Exception as e:
+        log(f"※{v['name']}: サイトからのダウンロードでエラー: {e}")
+        notify("請求書ツール", f"{v['name']} のサイトから請求書をダウンロードできませんでした。\n\n{e}\n\n"
+               "明日もう一度試します。詳しくは log.txt を見てください。", error=True)
+    return done
 
 
 # ---------------------------------------------------------------- 送信
@@ -347,7 +490,9 @@ def send_flow(cfg, state, force=False):
 
 # ---------------------------------------------------------------- 入口
 def main():
+    global SHOW_BROWSER
     args = sys.argv[1:]
+    SHOW_BROWSER = "--show-browser" in args
     try:
         cfg = load_config()
         state = load_state()
