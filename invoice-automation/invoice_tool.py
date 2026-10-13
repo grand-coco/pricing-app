@@ -113,7 +113,9 @@ def vendors(cfg):
             "senders": senders,
             "keyword": s.get("件名キーワード", "").strip(),
             "pdf_password": s.get("PDFパスワード", "").strip(),
-            "site": s.get("サイト", "").strip().lower(),
+            "site": {"リンク": "link"}.get(s.get("サイト", "").strip(), s.get("サイト", "").strip().lower()),
+            "link_url": s.get("リンクURL", "").strip(),
+            "button": s.get("ボタン", "").strip(),
             "login_id": s.get("ログインID", "").strip(),
             "login_password": s.get("ログインパスワード", "").strip(),
         })
@@ -188,6 +190,15 @@ def collect(cfg, state):
                     except Exception:
                         date = dt.date.today()
 
+                    if v["site"] == "link":
+                        # 添付なし：本文のダウンロード用リンクを、あとでブラウザで開いてダウンロードする
+                        urls = find_links(msg, v["link_url"])
+                        if not urls:
+                            log(f"※本文にダウンロード用のリンクが見つかりませんでした: {v['name']}／{subject}")
+                            continue
+                        for url in urls:
+                            site_jobs.setdefault(v["name"], []).append((url, date, key))
+                        continue
                     if v["site"]:
                         # 添付なし：件名から請求書番号を読み取り、あとでサイトからダウンロードする
                         m = re.search(r"(\d{4,})\s*[:：]", subject)
@@ -322,7 +333,39 @@ def download_meiraku(page, ctx, v, jobs, pending, done):
         done.append(key)
 
 
-SITES = {"meiraku": download_meiraku}
+def find_links(msg, prefix):
+    """メール本文から、prefix で始まるURLを探す（重複なし・出てきた順）"""
+    urls = []
+    for part in msg.walk():
+        if part.get_content_maintype() != "text":
+            continue
+        try:
+            text = part.get_content()
+        except Exception:
+            continue
+        for u in re.findall(r"https?://[^\s\"'<>]+", text):
+            u = u.replace("&amp;", "&").rstrip(".,)")
+            if (not prefix or u.startswith(prefix)) and u not in urls:
+                urls.append(u)
+    return urls
+
+
+def download_link(page, ctx, v, jobs, pending, done):
+    """メール本文のリンクを開いて、ダウンロードボタンを押す（ログイン不要のサイト）"""
+    for url, date, key in jobs:
+        page.goto(url)
+        page.wait_for_load_state("networkidle")
+        button = page.locator("a, button, input[type=button], input[type=submit]",
+                              has_text=v["button"] or "ダウンロード").first
+        if button.count() == 0 and v["button"]:
+            button = page.get_by_text(v["button"]).first
+        out = unique_path(pending / safe_name(f"{date:%Y-%m-%d}_{v['name']}_請求書.pdf"))
+        click_and_download(ctx, page, button, out)
+        log(f"保存: {out.name}（メールのリンクからダウンロード）")
+        done.append(key)
+
+
+SITES = {"meiraku": download_meiraku, "link": download_link}
 
 
 def download_from_site(v, jobs, pending):
@@ -331,7 +374,7 @@ def download_from_site(v, jobs, pending):
     if func is None:
         log(f"※{v['name']}: サイト = {v['site']} には対応していません")
         return []
-    if not v["login_id"] or not v["login_password"]:
+    if v["site"] != "link" and (not v["login_id"] or not v["login_password"]):
         log(f"※{v['name']}: ログインID／ログインパスワードが config.ini にありません")
         return []
     try:
