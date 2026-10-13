@@ -433,6 +433,8 @@ def send_flow(cfg, state, force=False):
         for p in files:
             z.write(p, arcname=p.name)
     size_mb = zip_path.stat().st_size / 1024 / 1024
+    # 添付ファイル名は英数字だけにする（日本語名だとヤフーメールなどで「untitled」になるため）
+    attach_name = f"seikyusho_{y}_{m:02d}.zip"
 
     if hasattr(os, "startfile"):
         os.startfile(pending)  # フォルダを開いて中身を見られるように
@@ -444,7 +446,7 @@ def send_flow(cfg, state, force=False):
         warn = f"\n\n⚠ 圧縮ファイルが {size_mb:.1f}MB あり、大きすぎて送れない可能性があります。"
 
     answer = ask("税理士さんへ送信してよいですか？",
-                 f"宛先: {to_addr}\n件名: {subject}\n添付: {zip_path.name}（{size_mb:.1f}MB）\n\n"
+                 f"宛先: {to_addr}\n件名: {subject}\n添付: {attach_name}（{size_mb:.1f}MB）\n\n"
                  f"入っている請求書（{len(files)}件）:\n{listing}{warn}\n\n"
                  "はい … 今すぐ送信します\n"
                  "いいえ … 今日は送らず、明日もう一度確認します\n"
@@ -472,7 +474,7 @@ def send_flow(cfg, state, force=False):
     msg["Subject"] = subject
     msg.set_content(body)
     msg.add_attachment(zip_path.read_bytes(), maintype="application", subtype="zip",
-                       filename=zip_path.name)
+                       filename=attach_name)
     try:
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ssl.create_default_context()) as s:
             s.login(user, password)
