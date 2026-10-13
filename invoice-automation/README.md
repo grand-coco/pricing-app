@@ -33,11 +33,14 @@
 
 このツールを動かすための無料のソフトです。
 
-1. ブラウザで https://www.python.org/downloads/ を開きます。
-2. 黄色の **「Download Python 3.x.x」** ボタンを押してダウンロードします。
-3. ダウンロードしたファイルを開きます。
+1. ブラウザで **https://www.python.org/downloads/windows/** を開きます。
+2. 「**Stable Releases**」の一番上にある「Python 3.14.x - ○○日付」の下の **「Download Windows installer (64-bit)」** を押します。
+   （「Python install manager」という項目は使いません）
+3. ダウンロードした `python-3.14.x-amd64.exe` を開きます。
 4. ⚠ 最初の画面の下にある **「Add python.exe to PATH」にチェック** を入れます。
-5. **「Install Now」** を押して、終わるまで待ちます。
+5. **「Install Now」** を押します。「このアプリがデバイスに変更を加えることを許可しますか？」と出たら「はい」を押します。
+6. 「Setup was successful」と出たら **「Close」** を押します。
+7. 確認：Windowsキーを押して「cmd」と入力し、コマンドプロンプトを開きます。`py --version` と入力してEnterキーを押し、`Python 3.14.x` と表示されれば成功です。
 
 ### 手順3　PDFのパスワード解除用の部品を入れる
 
