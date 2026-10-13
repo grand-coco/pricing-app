@@ -401,6 +401,8 @@ def send_flow(cfg, state, force=False):
     if not force:
         if today.day < send_day or state.get("last_sent_month") == this_month:
             return
+    # 送信日より前のテスト送信（--send-now）は「今月送った」と記録しない（20日の確認が出なくなるため）
+    record = today.day >= send_day
 
     pending, sent = folders(cfg)
     files = sorted(p for p in pending.iterdir() if p.is_file())
@@ -414,7 +416,8 @@ def send_flow(cfg, state, force=False):
                    "はい … 今月は送りません\n"
                    "いいえ … 明日もう一度確認します")
         if skip:
-            state["last_sent_month"] = this_month
+            if record:
+                state["last_sent_month"] = this_month
             save_state(state)
             log(f"{label}: 請求書が0件のため、今月は送信しませんでした")
         return
@@ -449,7 +452,8 @@ def send_flow(cfg, state, force=False):
                  cancel=True)
     if answer is None:
         zip_path.unlink(missing_ok=True)
-        state["last_sent_month"] = this_month
+        if record:
+            state["last_sent_month"] = this_month
         save_state(state)
         log(f"{label}: 今月は送らないことにしました（ファイルはそのまま残っています）")
         return
@@ -482,7 +486,8 @@ def send_flow(cfg, state, force=False):
     done_dir.mkdir(parents=True)
     for p in files:
         shutil.move(str(p), str(done_dir / p.name))
-    state["last_sent_month"] = this_month
+    if record:
+        state["last_sent_month"] = this_month
     save_state(state)
     log(f"{label}: {to_addr} へ送信しました（{len(files)}件）")
     notify("送信完了", f"{label}を税理士さんへ送信しました。\n\n送ったファイルは\n{done_dir}\nに移動しました。")
