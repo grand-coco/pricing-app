@@ -194,11 +194,14 @@ def collect(cfg, state):
 
                     if v["site"] == "yamato":
                         # 添付なし：本文の「ご請求年月日」（締め日）ごとに1回だけダウンロードする
-                        dm = find_closing_date(mail_text(msg))
-                        if not dm:
-                            log(f"※本文からご請求年月日を読み取れませんでした: {v['name']}／{subject}")
-                            continue
-                        closing = dm
+                        body = mail_text(msg)
+                        closing = find_closing_date(body)
+                        if not closing:
+                            # 「掲載のお知らせ」には締め日がないので、送信日の前月末を締め日とみなす（ヤマトは月末締め）
+                            sm = re.search(r"送信日\s*[：:]\s*(\d{4})\s*[/年]\s*(\d{1,2})\s*[/月]\s*(\d{1,2})",
+                                           unicodedata.normalize("NFKC", body))
+                            sent = dt.date(*map(int, sm.groups())) if sm else date
+                            closing = sent.replace(day=1) - dt.timedelta(days=1)
                         dkey = f"{v['name']}|site|{closing:%Y-%m-%d}"
                         jobs = site_jobs.setdefault(v["name"], [])
                         if dkey not in processed and all(j[2] != dkey for j in jobs):
