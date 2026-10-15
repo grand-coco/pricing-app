@@ -27,6 +27,7 @@ import smtplib
 import ssl
 import sys
 import traceback
+import unicodedata
 import zipfile
 from email.message import EmailMessage
 from email.utils import parseaddr
@@ -193,12 +194,11 @@ def collect(cfg, state):
 
                     if v["site"] == "yamato":
                         # 添付なし：本文の「ご請求年月日」（締め日）ごとに1回だけダウンロードする
-                        body = mail_text(msg)
-                        dm = re.search(r"ご請求年月日\s*[：:]\s*(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", body)
+                        dm = find_closing_date(mail_text(msg))
                         if not dm:
                             log(f"※本文からご請求年月日を読み取れませんでした: {v['name']}／{subject}")
                             continue
-                        closing = dt.date(*map(int, dm.groups()))
+                        closing = dm
                         dkey = f"{v['name']}|site|{closing:%Y-%m-%d}"
                         jobs = site_jobs.setdefault(v["name"], [])
                         if dkey not in processed and all(j[2] != dkey for j in jobs):
@@ -359,6 +359,20 @@ def mail_text(msg):
     return "\n".join(texts)
 
 
+def find_closing_date(body):
+    """本文から請求の締め日（ご請求年月日など）を探す。全角数字・HTMLにも対応"""
+    text = unicodedata.normalize("NFKC", re.sub(r"<[^>]+>", " ", body))
+    date_re = r"(\d{4})\s*[年/.\-]\s*(\d{1,2})\s*[月/.\-]\s*(\d{1,2})"
+    for label in (r"ご?請求年月日", r"ご?請求締め?日", r"締め?日", r"ご?請求日"):
+        m = re.search(label + r"[^\d\n]{0,10}" + date_re, text)
+        if m:
+            try:
+                return dt.date(*map(int, m.groups()))
+            except ValueError:
+                pass
+    return None
+
+
 def find_links(msg, prefix):
     """メール本文から、prefix で始まるURLを探す（重複なし・出てきた順）"""
     urls = []
@@ -391,6 +405,25 @@ def download_link(page, ctx, v, jobs, pending, done):
         done.append(key)
 
 
+def click_login(page):
+    """ログインボタンを探して押す。見つからなければパスワード欄で Enter を押す"""
+    only_login = re.compile(r"^\s*ログイン(する)?\s*$")
+    candidates = [
+        page.get_by_role("button", name=only_login),
+        page.locator("input[type=submit], input[type=image], button[type=submit]"),
+        page.locator("input[type=button][value*='ログイン']"),
+        page.get_by_role("link", name=only_login),
+        # 見出し以外で「ログイン」とだけ書かれた要素（divやspanで作られたボタン）
+        page.locator(":is(div,span,p,li,label,td):text-is('ログイン'), :is(div,span,p,li,label,td):text-is('ログインする')"),
+    ]
+    for c in candidates:
+        c = c.filter(visible=True)
+        if c.count() > 0:
+            c.last.click()  # 画面上部のメニューより下にある、フォームのボタンを優先
+            return
+    page.locator("input[type=password]").first.press("Enter")
+
+
 YAMATO_LOGIN_URL = "https://bmypage.kuronekoyamato.co.jp/bmypage/jsp/webbill.jsp"
 
 
@@ -404,16 +437,13 @@ def download_yamato(page, ctx, v, jobs, pending, done):
     fill_field(page, "パスワード", "input[type=password]", v["login_password"])
     if v.get("user_id"):
         fill_field(page, "個人ユーザーID", "input[placeholder='00000000']", v["user_id"])
-    button = page.get_by_role("button", name="ログイン", exact=True)
-    if button.count() == 0:
-        button = page.locator("input[type=submit], button[type=submit]")
-    button.first.click()
+    click_login(page)
     try:
-        page.wait_for_selector("text=請求明細書", timeout=30000)
+        page.wait_for_selector("text=請求書番号", timeout=30000)
     except Exception:
         if page.locator("input[type=password]").count():
             raise RuntimeError("ログインできませんでした。ログインID（お客様コード）／ログインパスワードを確認してください")
-        raise RuntimeError("ログイン後に請求書の一覧画面が見つかりませんでした")
+        raise RuntimeError(f"ログイン後に請求書の一覧画面が見つかりませんでした（{page.url}）")
 
     for closing, _, key in jobs:
         row = page.locator("tr", has_text=f"{closing:%Y/%m/%d}")
@@ -454,7 +484,15 @@ def download_from_site(v, jobs, pending):
             browser = open_browser(pw)
             try:
                 ctx = browser.new_context(accept_downloads=True)
-                func(ctx.new_page(), ctx, v, jobs, pending, done)
+                page = ctx.new_page()
+                try:
+                    func(page, ctx, v, jobs, pending, done)
+                except Exception:
+                    try:  # 止まった画面を保存（困ったときに送ってもらう用）
+                        page.screenshot(path=str(TOOL_DIR / "error_screen.png"), full_page=True)
+                    except Exception:
+                        pass
+                    raise
             finally:
                 browser.close()
     except Exception as e:
