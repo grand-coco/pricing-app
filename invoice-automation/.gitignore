@@ -3,3 +3,4 @@ state.json
 log.txt
 請求書/
 error_screen.png
+__pycache__/
