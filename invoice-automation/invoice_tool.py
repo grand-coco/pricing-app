@@ -118,6 +118,7 @@ def vendors(cfg):
             "button": s.get("ボタン", "").strip(),
             "login_id": s.get("ログインID", "").strip(),
             "login_password": s.get("ログインパスワード", "").strip(),
+            "user_id": s.get("個人ユーザーID", "").strip(),
         })
     return result
 
@@ -190,6 +191,19 @@ def collect(cfg, state):
                     except Exception:
                         date = dt.date.today()
 
+                    if v["site"] == "yamato":
+                        # 添付なし：本文の「ご請求年月日」（締め日）ごとに1回だけダウンロードする
+                        body = mail_text(msg)
+                        dm = re.search(r"ご請求年月日\s*[：:]\s*(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", body)
+                        if not dm:
+                            log(f"※本文からご請求年月日を読み取れませんでした: {v['name']}／{subject}")
+                            continue
+                        closing = dt.date(*map(int, dm.groups()))
+                        dkey = f"{v['name']}|site|{closing:%Y-%m-%d}"
+                        jobs = site_jobs.setdefault(v["name"], [])
+                        if dkey not in processed and all(j[2] != dkey for j in jobs):
+                            jobs.append((closing, closing, dkey))
+                        continue
                     if v["site"] == "link":
                         # 添付なし：本文のダウンロード用リンクを、あとでブラウザで開いてダウンロードする
                         urls = find_links(msg, v["link_url"])
@@ -333,6 +347,18 @@ def download_meiraku(page, ctx, v, jobs, pending, done):
         done.append(key)
 
 
+def mail_text(msg):
+    """メール本文（テキスト部分）をまとめて返す"""
+    texts = []
+    for part in msg.walk():
+        if part.get_content_maintype() == "text":
+            try:
+                texts.append(part.get_content())
+            except Exception:
+                pass
+    return "\n".join(texts)
+
+
 def find_links(msg, prefix):
     """メール本文から、prefix で始まるURLを探す（重複なし・出てきた順）"""
     urls = []
@@ -365,7 +391,47 @@ def download_link(page, ctx, v, jobs, pending, done):
         done.append(key)
 
 
-SITES = {"meiraku": download_meiraku, "link": download_link}
+YAMATO_LOGIN_URL = "https://bmypage.kuronekoyamato.co.jp/bmypage/jsp/webbill.jsp"
+
+
+def download_yamato(page, ctx, v, jobs, pending, done):
+    """ヤマトビジネスメンバーズ「Web請求書提供サービス」の請求明細書"""
+    page.goto(YAMATO_LOGIN_URL)
+    code, _, branch = v["login_id"].replace("－", "-").partition("-")
+    fill_field(page, "お客様コード", "input[placeholder='000000000000']", code.strip())
+    if branch.strip():
+        page.locator("input[type=text], input[type=tel], input:not([type])").nth(1).fill(branch.strip())
+    fill_field(page, "パスワード", "input[type=password]", v["login_password"])
+    if v.get("user_id"):
+        fill_field(page, "個人ユーザーID", "input[placeholder='00000000']", v["user_id"])
+    button = page.get_by_role("button", name="ログイン", exact=True)
+    if button.count() == 0:
+        button = page.locator("input[type=submit], button[type=submit]")
+    button.first.click()
+    try:
+        page.wait_for_selector("text=請求明細書", timeout=30000)
+    except Exception:
+        if page.locator("input[type=password]").count():
+            raise RuntimeError("ログインできませんでした。ログインID（お客様コード）／ログインパスワードを確認してください")
+        raise RuntimeError("ログイン後に請求書の一覧画面が見つかりませんでした")
+
+    for closing, _, key in jobs:
+        row = page.locator("tr", has_text=f"{closing:%Y/%m/%d}")
+        if row.count() == 0:
+            log(f"※{v['name']}: 一覧に {closing:%Y/%m/%d} の請求が見つかりませんでした")
+            continue
+        # 行の中の「未出力／出力済」リンクのうち、最後のものが請求明細書
+        link = row.first.locator("a", has_text=re.compile("出力"))
+        if link.count() < 2:
+            log(f"※{v['name']}: {closing:%Y/%m/%d} の請求明細書はダウンロードできません（掲載期間切れの可能性）")
+            continue
+        out = unique_path(pending / f"{closing:%Y-%m}_{v['name']}_請求明細書.pdf")
+        click_and_download(ctx, page, link.last, out)
+        log(f"保存: {out.name}（サイトからダウンロード）")
+        done.append(key)
+
+
+SITES = {"meiraku": download_meiraku, "link": download_link, "yamato": download_yamato}
 
 
 def download_from_site(v, jobs, pending):
