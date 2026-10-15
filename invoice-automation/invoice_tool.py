@@ -424,6 +424,33 @@ def click_login(page):
     page.locator("input[type=password]").first.press("Enter")
 
 
+def open_menu(ctx, page, label):
+    """メニューの項目を押す。新しいタブで開いた場合はそのタブを返す"""
+    pattern = re.compile(re.escape(label))
+    candidates = [
+        page.get_by_role("link", name=pattern),
+        page.get_by_role("button", name=pattern),
+        page.locator(f"img[alt*='{label}']"),
+        page.locator(f"input[value*='{label}']"),
+        page.get_by_text(label),
+    ]
+    target = None
+    for c in candidates:
+        c = c.filter(visible=True)
+        if c.count() > 0:
+            target = c.first
+            break
+    if target is None:
+        raise RuntimeError(f"メニューに「{label}」が見つかりませんでした（{page.url.split('?')[0]}）")
+    before = len(ctx.pages)
+    target.click()
+    page.wait_for_timeout(1500)
+    if len(ctx.pages) > before:  # 新しいタブで開いた
+        page = ctx.pages[-1]
+    page.wait_for_load_state("networkidle")
+    return page
+
+
 YAMATO_LOGIN_URL = "https://bmypage.kuronekoyamato.co.jp/bmypage/jsp/webbill.jsp"
 
 
@@ -438,12 +465,17 @@ def download_yamato(page, ctx, v, jobs, pending, done):
     if v.get("user_id"):
         fill_field(page, "個人ユーザーID", "input[placeholder='00000000']", v["user_id"])
     click_login(page)
+    page.wait_for_load_state("networkidle")
+    if page.locator("input[type=password]").filter(visible=True).count():
+        raise RuntimeError("ログインできませんでした。ログインID（お客様コード）／ログインパスワードを確認してください")
+
+    # ログイン後のメニュー画面で「請求書・請求明細書ダウンロード」を押して一覧画面へ
+    if page.get_by_text("請求書番号").count() == 0:
+        page = open_menu(ctx, page, "請求書・請求明細書ダウンロード")
     try:
         page.wait_for_selector("text=請求書番号", timeout=30000)
     except Exception:
-        if page.locator("input[type=password]").count():
-            raise RuntimeError("ログインできませんでした。ログインID（お客様コード）／ログインパスワードを確認してください")
-        raise RuntimeError(f"ログイン後に請求書の一覧画面が見つかりませんでした（{page.url}）")
+        raise RuntimeError(f"請求書の一覧画面が見つかりませんでした（{page.url.split('?')[0]}）")
 
     for closing, _, key in jobs:
         row = page.locator("tr", has_text=f"{closing:%Y/%m/%d}")
