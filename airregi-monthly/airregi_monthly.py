@@ -339,5 +339,37 @@ def main():
     print(f"送ったファイルは {done} に移しました。")
 
 
+class Tee:
+    """画面に出す内容を「実行結果.txt」にも書き残す。"""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s):
+        for st in self.streams:
+            st.write(s)
+            st.flush()
+
+    def flush(self):
+        for st in self.streams:
+            st.flush()
+
+
 if __name__ == "__main__":
-    main()
+    import traceback
+    code = 0
+    with open(HERE / "実行結果.txt", "w", encoding="utf-8-sig") as log:
+        sys.stdout = Tee(sys.__stdout__, log)
+        sys.stderr = Tee(sys.__stderr__, log)
+        try:
+            main()
+        except SystemExit as e:
+            if isinstance(e.code, str):
+                print(e.code)
+            code = 0 if e.code in (None, 0) else 1
+        except Exception:
+            traceback.print_exc()
+            code = 1
+        finally:
+            sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+    sys.exit(code)
