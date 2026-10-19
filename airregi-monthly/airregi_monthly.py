@@ -265,10 +265,11 @@ def main():
         print("  ", p.name)
 
     problems = []
-    for kind, need in (("売上集計", 1), ("商品別売上", 1), ("振込明細", 2)):
+    for kind, label, need in (("売上集計", "エアレジ売上集計", 1), ("商品別売上", "エアレジ商品別売上", 1),
+                              ("振込明細", "Airペイ振込明細", 2)):
         n = len(files.get(kind, []))
         if n < need:
-            problems.append(f"エアレジ{kind}のCSVが{n}件しかありません（{need}件必要）")
+            problems.append(f"{label}のCSVが{n}件しかありません（{need}件必要）")
     if not [p for p in originals if p.suffix.lower() in (".pdf", ".xlsx", ".xls", ".xlsm")]:
         problems.append("売上請求書（PDFまたはExcel）が見つかりません")
 
