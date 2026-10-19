@@ -1,0 +1,3 @@
+*.bat -text
+*.ini -text
+*.txt -text
