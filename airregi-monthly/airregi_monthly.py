@@ -269,8 +269,8 @@ def main():
         n = len(files.get(kind, []))
         if n < need:
             problems.append(f"エアレジ{kind}のCSVが{n}件しかありません（{need}件必要）")
-    if not [p for p in originals if p.suffix.lower() == ".pdf"]:
-        problems.append("売上請求書（PDF）が見つかりません")
+    if not [p for p in originals if p.suffix.lower() in (".pdf", ".xlsx", ".xls", ".xlsm")]:
+        problems.append("売上請求書（PDFまたはExcel）が見つかりません")
 
     generated = []
     if files.get("商品別売上"):
