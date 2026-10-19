@@ -1,8 +1,8 @@
 """エアレジ月次データ送付ツール
 
 格納先フォルダのファイルをすべてzipにまとめ、
-  ⑦消費税10%売上リスト（商品別売上CSVから作成）
-  ①PayPay入金額と手数料（ヤフーメールの入金メールから作成）
+  消費税10%売上リスト（商品別売上CSVから作成）
+  PayPay入金額と手数料（ヤフーメールの入金メールから作成）
 を加えて、税理士事務所へメール送信する。送信後、送ったファイルは「送付済」フォルダへ移す。
 
   python airregi_monthly.py            通常実行（毎月7日にタスクから起動）
@@ -93,7 +93,7 @@ def target_month(files, today):
     return last.year, last.month
 
 
-# ---------- ⑦消費税10%売上リスト ----------
+# ---------- 消費税10%売上リスト ----------
 
 def build_tax10_list(product_csv, categories, out_path):
     df = pd.read_csv(product_csv, encoding=CSV_ENC)
@@ -140,7 +140,7 @@ def build_tax10_list(product_csv, categories, out_path):
     return summary, notfound
 
 
-# ---------- ①PayPay入金メール ----------
+# ---------- PayPay入金メール ----------
 
 def mail_text(msg):
     part = msg.get_body(preferencelist=("plain", "html"))
@@ -215,7 +215,7 @@ def fetch_paypay(cfg, account, today, out_dir):
                 continue
             date = parsedate_to_datetime(msg["Date"]).strftime("%Y%m%d")
             text = mail_text(msg)
-            path = out_dir / f"①PayPay入金メール本文_{date}_{len(saved) + 1}.txt"
+            path = out_dir / f"PayPay入金メール本文_{date}_{len(saved) + 1}.txt"
             body = f"件名: {msg['Subject']}\n受信日時: {msg['Date']}\n差出人: {msg['From']}\n\n{text}\n"
             path.write_text(body, encoding="utf-8-sig")
             saved.append(path)
@@ -276,10 +276,10 @@ def main():
     generated = []
     if files.get("商品別売上"):
         cats = [c.strip() for c in cfg["消費税10%"]["カテゴリー"].split(",") if c.strip()]
-        out = work / f"⑦消費税10%売上リスト_{year}年{month}月.xlsx"
+        out = work / f"消費税10%売上リスト_{year}年{month}月.xlsx"
         summary, notfound = build_tax10_list(files["商品別売上"][0], cats, out)
         generated.append(out)
-        print("\n⑦消費税10%売上リスト")
+        print("\n消費税10%売上リスト")
         print(summary.to_string(index=False))
         if notfound:
             print(f"（注意）商品別売上に見つからないカテゴリー: {', '.join(notfound)}")
@@ -292,10 +292,10 @@ def main():
             pp, records = [], []
             problems.append(f"ヤフーメールからPayPayのメールを取得できませんでした（{e}）")
         if records:
-            out = work / f"①PayPay入金額と手数料_{year}年{month}月.xlsx"
+            out = work / f"PayPay入金額と手数料_{year}年{month}月.xlsx"
             table = build_paypay_list(records, out)
             generated.append(out)
-            print("\n①PayPay入金額と手数料")
+            print("\nPayPay入金額と手数料")
             print(table.to_string(index=False))
             if table[PAYPAY_AMOUNTS].isna().any().any():
                 problems.append("PayPayメールの金額を一部読み取れませんでした（メール本文のtxtも添付しています）")
