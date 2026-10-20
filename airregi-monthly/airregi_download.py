@@ -166,17 +166,28 @@ def pick_range(page, y, m, last, test):
     if test:
         save_trouble(page, "3a_商品別売上_カレンダー")  # カレンダーの作りを確認する用
     header = cal.locator("tr.movement td.switch").first
-    want = f"{y}年{m}月"
-    for _ in range(36):  # 対象月が表示されるまで「«」「»」で移動
-        shown = header.inner_text().strip()
-        if shown == want:
+
+    def shown():
+        nums = re.findall(r"\d+", header.inner_text())
+        return (int(nums[0]), int(nums[1])) if len(nums) >= 2 else None
+
+    for _ in range(36):  # 対象月が表示されるまで「«」「»」で移動（「2026年09月」のような0付きにも対応）
+        now = shown()
+        if now is None:
+            raise RuntimeError(f"カレンダーの年月が読めませんでした（{header.inner_text()!r}）")
+        if now == (y, m):
             break
-        sy, sm = map(int, re.findall(r"\d+", shown)[:2])
-        arrow = cal.locator("tr.movement td").first if (sy, sm) > (y, m) else cal.locator("tr.movement td").last
+        row = cal.locator("tr.movement td")
+        arrow = row.first if now > (y, m) else row.last
         arrow.click()
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(500)
+        if shown() == now:  # 押しても月が変わらない
+            arrow.locator("*").first.click() if arrow.locator("*").count() else None
+            page.wait_for_timeout(500)
+            if shown() == now:
+                raise RuntimeError(f"カレンダーの「«」「»」で月を移動できませんでした（{header.inner_text().strip()}のまま）")
     else:
-        raise RuntimeError(f"カレンダーに{want}が出てきませんでした")
+        raise RuntimeError(f"カレンダーに{y}年{m}月が出てきませんでした（{header.inner_text().strip()}）")
     for day in (1, last):
         # 前後の月の日付（class="old" / "new"）は除く
         cell = cal.locator("tbody td:not(.old):not(.new)").filter(has_text=re.compile(rf"^\s*{day}\s*$"))
