@@ -158,38 +158,33 @@ def get_daily(page, cfg, y, m, out_dir):
 
 
 def pick_range(page, y, m, last, test):
-    """カレンダーを開いて、対象月の1日と末日を選ぶ。"""
-    box = page.locator(".datepicker input").first
+    """「期間選択」カレンダーを開いて、対象月の1日と末日を選んで「確定」を押す。"""
+    box = page.locator(".input-date .datepicker input, .datepicker input").first
     box.click()
-    page.wait_for_timeout(1000)
+    cal = page.locator(".picker .datepicker-container").first
+    cal.wait_for(state="visible", timeout=10000)
     if test:
         save_trouble(page, "3a_商品別売上_カレンダー")  # カレンダーの作りを確認する用
-    want = re.compile(rf"{y}\s*年\s*{m}\s*月|{y}[/.]0?{m}(?!\d)")
-    cal = page.locator(".datepicker").first
-    for _ in range(24):  # 対象月が表示されるまで前の月へ
-        if want.search(cal.inner_text()):
+    header = cal.locator("tr.movement td.switch").first
+    want = f"{y}年{m}月"
+    for _ in range(36):  # 対象月が表示されるまで「«」「»」で移動
+        shown = header.inner_text().strip()
+        if shown == want:
             break
-        prev = visible(cal.locator("[class*=prev], [class*=Prev], [aria-label*='前'], button:has-text('<'), button:has-text('‹')"))
-        if prev.count() == 0:
-            raise RuntimeError("カレンダーの「前の月」ボタンが見つかりませんでした")
-        prev.first.click()
+        sy, sm = map(int, re.findall(r"\d+", shown)[:2])
+        arrow = cal.locator("tr.movement td").first if (sy, sm) > (y, m) else cal.locator("tr.movement td").last
+        arrow.click()
         page.wait_for_timeout(300)
     else:
-        raise RuntimeError(f"カレンダーに{y}年{m}月が出てきませんでした")
+        raise RuntimeError(f"カレンダーに{want}が出てきませんでした")
     for day in (1, last):
-        # 前後の月の日付（グレー表示）や選べない日は除く
-        skip = ":not([class*=outside]):not([class*=Outside]):not([class*=disabled]):not([class*=other])"
-        cells = visible(cal.locator(", ".join(f"{t}{skip}" for t in ("td", "button", "[role=gridcell]", "[class*=day]")))
-                        .filter(has_text=re.compile(rf"^\s*{day}\s*$")))
-        if cells.count() == 0:
+        # 前後の月の日付（class="old" / "new"）は除く
+        cell = cal.locator("tbody td:not(.old):not(.new)").filter(has_text=re.compile(rf"^\s*{day}\s*$"))
+        if cell.count() == 0:
             raise RuntimeError(f"カレンダーで{day}日を押せませんでした")
-        cells.first.click()
+        cell.first.click()
         page.wait_for_timeout(300)
-    ok = visible(cal.locator("button", has_text=re.compile(r"^\s*(OK|決定|適用|設定|閉じる)\s*$")))
-    if ok.count():
-        ok.first.click()
-    else:
-        page.keyboard.press("Escape")
+    cal.locator("button.btn-confirm, button:has-text('確定')").first.click()
     page.wait_for_timeout(500)
     value = box.input_value()
     if f"{y}/{m:02d}/01" not in value or f"{y}/{m:02d}/{last:02d}" not in value:
