@@ -5,7 +5,7 @@
   PayPay入金額と手数料（ヤフーメールの入金メールから作成）
 を加えて、税理士事務所へメール送信する。送信後、送ったファイルは「送付済」フォルダへ移す。
 
-  python airregi_monthly.py            通常実行（毎月7日にタスクから起動）
+  python airregi_monthly.py            通常実行（毎月10日にタスクから起動）
   python airregi_monthly.py --test     送信せずにzipとメール下書き(.eml)だけ作る
   python airregi_monthly.py --check    ヤフーメールに接続できるか確認する
 
