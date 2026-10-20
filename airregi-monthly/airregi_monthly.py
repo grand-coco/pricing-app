@@ -84,6 +84,33 @@ def csv_kind(path):
     return None
 
 
+def present_steps(files, year, month):
+    """格納先にもうあるCSVを、エアレジ自動ダウンロードの手順名で返す。"""
+    have = set()
+    for p in files.get("売上集計", []):
+        if str(pd.read_csv(p, encoding=CSV_ENC)["集計期間"].min()).startswith(f"{year}{month:02d}"):
+            have.add("daily")
+    if files.get("商品別売上"):
+        have.add("product")
+    ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
+    for p in files.get("振込明細", []):
+        months = set(re.findall(r'^"(\d{4}-\d{2})-\d{2}"', p.read_bytes().decode(CSV_ENC, errors="ignore"), re.M))
+        if f"{year}-{month:02d}" in months:
+            have.add("payout")
+        if f"{ny}-{nm:02d}" in months:
+            have.add("payout_next")
+    return have
+
+
+def scan(folder):
+    originals = [p for p in sorted(folder.iterdir()) if p.is_file() and not p.name.startswith("~$")]
+    files = {}
+    for p in originals:
+        if p.suffix.lower() == ".csv" and (k := csv_kind(p)):
+            files.setdefault(k, []).append(p)
+    return originals, files
+
+
 def target_month(files, today):
     """対象月。売上集計CSVの日付から決め、なければ先月とする。"""
     for p in files.get("売上集計", []):
@@ -254,17 +281,20 @@ def main():
         shutil.rmtree(work)
     work.mkdir(parents=True)
 
-    originals = [p for p in sorted(folder.iterdir()) if p.is_file() and not p.name.startswith("~$")]
-    files = {}
-    for p in originals:
-        if p.suffix.lower() == ".csv" and (k := csv_kind(p)):
-            files.setdefault(k, []).append(p)
+    originals, files = scan(folder)
     year, month = target_month(files, today)
+    problems = []
+    if cfg.has_section("エアレジ") and yes(cfg["エアレジ"].get("自動ダウンロード", "いいえ")):
+        import airregi_download
+        failed = airregi_download.run(cfg, year, month, folder, skip=present_steps(files, year, month))
+        for name in failed:
+            problems.append(f"エアレジ・Airペイからの自動ダウンロードに失敗しました（{name}）")
+        print()
+        originals, files = scan(folder)
     print(f"対象月: {year}年{month}月\n格納先のファイル: {len(originals)}件")
     for p in originals:
         print("  ", p.name)
 
-    problems = []
     for kind, label, need in (("売上集計", "エアレジ売上集計", 1), ("商品別売上", "エアレジ商品別売上", 1),
                               ("振込明細", "Airペイ振込明細", 2)):
         n = len(files.get(kind, []))

@@ -242,36 +242,48 @@ def get_payout(page, cfg, y, m, out_dir):
     return path
 
 
-def main():
-    cfg = load_config()
-    test = "--test" in sys.argv
-    y, m = parse_month(sys.argv, dt.date.today())
-    out_dir = HERE / "取得テスト" if test else Path(cfg["フォルダ"]["格納先"].strip())
+def run(cfg, y, m, out_dir, show=False, skip=()):
+    """ダウンロードして、失敗した手順の名前の一覧を返す。skip に入れた手順（daily / product /
+    payout / payout_next）は、もうファイルがあるものとして飛ばす。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     if LOG_DIR.exists():
         shutil.rmtree(LOG_DIR)
     if not cfg.has_section("エアレジ") or not cfg["エアレジ"].get("パスワード", "").strip():
-        sys.exit("設定.ini の [エアレジ] にログインIDとパスワードを書いてください。")
+        print("  設定.ini の [エアレジ] にログインIDとパスワードがありません")
+        return ["ログイン"]
+    ny, nm = next_month(y, m)
+    steps = [
+        ("daily", "2_日別売上", lambda page: get_daily(page, cfg, y, m, out_dir)),
+        ("product", "3_商品別売上", lambda page: get_product(page, cfg, y, m, out_dir, show)),
+        ("payout", f"4_振込明細_{m}月振込分", lambda page: get_payout(page, cfg, y, m, out_dir)),
+        ("payout_next", f"5_振込明細_{nm}月振込分", lambda page: get_payout(page, cfg, ny, nm, out_dir)),
+    ]
+    steps = [st for st in steps if st[0] not in skip]
+    print(f"エアレジ・Airペイから {y}年{m}月分 を取得します（保存先: {out_dir}）")
+    if not steps:
+        print("  必要なファイルはそろっているので、ダウンロードしませんでした")
+        return []
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        sys.exit("playwright が入っていません。「エアレジ取得の準備.bat」を実行してください。")
+        print("  playwright が入っていません。「エアレジ取得の準備.bat」を実行してください。")
+        return ["準備"]
 
-    print(f"エアレジ・Airペイから {y}年{m}月分 を取得します（保存先: {out_dir}）")
-    results = []
+    failed = []
     with sync_playwright() as pw:
         # 前回のログイン状態を残すため、ツール専用のブラウザ設定フォルダを使う
         ctx = None
         for channel in ("msedge", "chrome", None):
             try:
                 ctx = pw.chromium.launch_persistent_context(
-                    str(HERE / "browser_profile"), headless=not test, accept_downloads=True,
+                    str(HERE / "browser_profile"), headless=not show, accept_downloads=True,
                     viewport={"width": 1400, "height": 1000}, **({"channel": channel} if channel else {}))
                 break
             except Exception:
                 continue
         if ctx is None:
-            sys.exit("Edge も Chrome も起動できませんでした")
+            print("  Edge も Chrome も起動できませんでした")
+            return ["ブラウザ"]
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         try:
             login(page, cfg)
@@ -280,29 +292,29 @@ def main():
             save_trouble(page, "1_ログイン")
             print(f"  ログイン: 失敗（{e}）")
             ctx.close()
-            return 1
-        ny, nm = next_month(y, m)
-        steps = [
-            ("2_日別売上", lambda: get_daily(page, cfg, y, m, out_dir)),
-            ("3_商品別売上", lambda: get_product(page, cfg, y, m, out_dir, test)),
-            (f"4_振込明細_{m}月振込分", lambda: get_payout(page, cfg, y, m, out_dir)),
-            (f"5_振込明細_{nm}月振込分", lambda: get_payout(page, cfg, ny, nm, out_dir)),
-        ]
-        for name, step in steps:
+            return ["ログイン"]
+        for _, name, step in steps:
             try:
-                path = step()
+                path = step(page)
                 print(f"  {name[2:]}: OK（{path.name}）")
-                results.append(True)
             except Exception as e:
                 save_trouble(page, name)
                 print(f"  {name[2:]}: 失敗（{str(e).splitlines()[0]}）")
-                results.append(False)
+                failed.append(name[2:])
         ctx.close()
-    if all(results):
-        print("\nすべて取得できました。")
-        return 0
-    print(f"\nうまくいかなかった画面を次のフォルダに保存しました:\n  {LOG_DIR}")
-    return 1
+    if failed:
+        print(f"  うまくいかなかった画面を次のフォルダに保存しました: {LOG_DIR}")
+    return failed
+
+
+def main():
+    cfg = load_config()
+    test = "--test" in sys.argv
+    y, m = parse_month(sys.argv, dt.date.today())
+    out_dir = HERE / "取得テスト" if test else Path(cfg["フォルダ"]["格納先"].strip())
+    failed = run(cfg, y, m, out_dir, show=test)
+    print("\nすべて取得できました。" if not failed else "\n一部取得できませんでした。")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
