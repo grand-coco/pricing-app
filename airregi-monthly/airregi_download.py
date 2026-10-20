@@ -73,21 +73,6 @@ def download(page, text, timeout=30000):
     return info.value
 
 
-def set_input_value(page, locator, value):
-    """入力欄に値を入れる。読み取り専用の欄にはJavaScriptで入れる。"""
-    try:
-        locator.fill(value, timeout=3000)
-    except Exception:
-        locator.evaluate(
-            """(el, v) => {
-                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                setter.call(el, v);
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-                el.dispatchEvent(new Event('change', {bubbles: true}));
-            }""", value)
-    page.keyboard.press("Escape")  # カレンダーが開いたら閉じる
-
-
 def select_year_month(page, y, m):
     """年と月のプルダウンがあれば選ぶ。選べたら True。"""
     done_y = done_m = False
@@ -112,47 +97,57 @@ def select_year_month(page, y, m):
 
 # ---------- 各画面 ----------
 
-def login(page, cfg):
-    page.goto(DAILY_URL)
-    page.wait_for_load_state("networkidle")
-    pw_box = visible(page.locator("input[type=password]"))
+def fill_login_form(page, cfg):
+    """ログイン画面・本人確認画面が出ていれば入力して進む。出ていなければ何もしない。"""
+    pw_box = visible(page.locator("input[name=password], input[type=password]:not([name^=dummy])"))
     if pw_box.count() == 0:
-        return  # 前回のログインが残っている
+        return
     a = cfg["エアレジ"]
-    visible(page.locator("input:not([type=password]):not([type=hidden]):not([type=checkbox])"
-                         ":not([type=radio]):not([type=submit]):not([type=button])")).first.fill(a["ログインID"].strip())
+    id_box = visible(page.locator("input[name=username]:not([type=hidden])"))
+    if id_box.count() == 0:
+        id_box = visible(page.locator("input:not([type=password]):not([type=hidden]):not([type=checkbox])"
+                                      ":not([type=radio]):not([type=submit]):not([type=button]):not([name^=dummy])"))
+    if id_box.count() > 0:  # 本人確認画面にはIDの欄がない
+        id_box.first.fill(a["ログインID"].strip())
     pw_box.first.fill(a["パスワード"].strip())
-    only_login = re.compile(r"^\s*ログイン(する)?\s*$")
-    btn = visible(page.get_by_role("button", name=only_login))
+    btn = visible(page.locator("input[type=submit][value='ログイン']"))
     if btn.count() == 0:
-        btn = visible(page.locator("input[type=submit], button[type=submit]"))
+        btn = visible(page.get_by_role("button", name=re.compile(r"^\s*ログイン(する)?\s*$")))
     btn.last.click() if btn.count() else pw_box.first.press("Enter")
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(2000)
-    if visible(page.locator("input[type=password]")).count() > 0:
+    if visible(page.locator("input[name=password], input[type=password]:not([name^=dummy])")).count() > 0:
         raise RuntimeError("ログインできませんでした（IDとパスワード、または確認コードの画面を確認してください）")
-    if "salesList" not in page.url:
-        page.goto(DAILY_URL)
-        page.wait_for_load_state("networkidle")
 
 
-def get_daily(page, y, m, out_dir):
-    page.goto(DAILY_URL)
+def open_page(page, cfg, url):
+    """ページを開く。ログインや本人確認を求められたら入力して、もう一度開く。"""
+    page.goto(url)
     page.wait_for_load_state("networkidle")
+    if visible(page.locator("input[name=password], input[type=password]:not([name^=dummy])")).count() > 0:
+        fill_login_form(page, cfg)
+        if not page.url.startswith(url.split("?")[0]):
+            page.goto(url)
+            page.wait_for_load_state("networkidle")
     page.wait_for_timeout(1500)
+
+
+def login(page, cfg):
+    open_page(page, cfg, DAILY_URL)
+
+
+def get_daily(page, cfg, y, m, out_dir):
+    open_page(page, cfg, DAILY_URL)
     if not select_year_month(page, y, m):
-        boxes = visible(page.locator("input")).all()
-        box = next((b for b in boxes if re.search(r"\d{4}\s*[/年]\s*\d{1,2}", b.input_value() or "")), None)
-        if box is None:
-            raise RuntimeError("対象月を入れる欄が見つかりませんでした")
-        old = box.input_value()
-        new = re.sub(r"(\d{4})(\s*[/年]\s*)(\d{1,2})",
-                     lambda mt: f"{y}{mt.group(2)}{m:0{len(mt.group(3))}d}", old, count=1)
-        set_input_value(page, box, new)
+        raise RuntimeError("対象月のプルダウンが見つかりませんでした")
     click_text(page, "表示する")
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(2000)
-    d = download(page, "CSVデータをダウンロードする")
+    click_text(page, "CSVデータをダウンロードする")
+    page.wait_for_timeout(1000)
+    with page.expect_download(timeout=30000) as info:
+        page.locator("[data-testid=salesList-csv-download-tooltip] button", has_text="売上集計").first.click()
+    d = info.value
     path = out_dir / d.suggested_filename
     d.save_as(path)
     first = path.read_bytes().decode(CSV_ENC, errors="ignore").splitlines()[1].split(",")[0]
@@ -162,19 +157,49 @@ def get_daily(page, y, m, out_dir):
     return path
 
 
-def get_product(page, y, m, out_dir):
-    page.goto(PRODUCT_URL)
-    page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(1500)
+def pick_range(page, y, m, last, test):
+    """カレンダーを開いて、対象月の1日と末日を選ぶ。"""
+    box = page.locator(".datepicker input").first
+    box.click()
+    page.wait_for_timeout(1000)
+    if test:
+        save_trouble(page, "3a_商品別売上_カレンダー")  # カレンダーの作りを確認する用
+    want = re.compile(rf"{y}\s*年\s*{m}\s*月|{y}[/.]0?{m}(?!\d)")
+    cal = page.locator(".datepicker").first
+    for _ in range(24):  # 対象月が表示されるまで前の月へ
+        if want.search(cal.inner_text()):
+            break
+        prev = visible(cal.locator("[class*=prev], [class*=Prev], [aria-label*='前'], button:has-text('<'), button:has-text('‹')"))
+        if prev.count() == 0:
+            raise RuntimeError("カレンダーの「前の月」ボタンが見つかりませんでした")
+        prev.first.click()
+        page.wait_for_timeout(300)
+    else:
+        raise RuntimeError(f"カレンダーに{y}年{m}月が出てきませんでした")
+    for day in (1, last):
+        # 前後の月の日付（グレー表示）や選べない日は除く
+        skip = ":not([class*=outside]):not([class*=Outside]):not([class*=disabled]):not([class*=other])"
+        cells = visible(cal.locator(", ".join(f"{t}{skip}" for t in ("td", "button", "[role=gridcell]", "[class*=day]")))
+                        .filter(has_text=re.compile(rf"^\s*{day}\s*$")))
+        if cells.count() == 0:
+            raise RuntimeError(f"カレンダーで{day}日を押せませんでした")
+        cells.first.click()
+        page.wait_for_timeout(300)
+    ok = visible(cal.locator("button", has_text=re.compile(r"^\s*(OK|決定|適用|設定|閉じる)\s*$")))
+    if ok.count():
+        ok.first.click()
+    else:
+        page.keyboard.press("Escape")
+    page.wait_for_timeout(500)
+    value = box.input_value()
+    if f"{y}/{m:02d}/01" not in value or f"{y}/{m:02d}/{last:02d}" not in value:
+        raise RuntimeError(f"期間を設定できませんでした（{value}）")
+
+
+def get_product(page, cfg, y, m, out_dir, test):
+    open_page(page, cfg, PRODUCT_URL)
     last = calendar.monthrange(y, m)[1]
-    boxes = visible(page.locator("input")).all()
-    box = next((b for b in boxes if re.search(r"\d{4}/\d{2}/\d{2}", b.input_value() or "")), None)
-    if box is None:
-        raise RuntimeError("期間を入れる欄が見つかりませんでした")
-    old = box.input_value()
-    sep = re.search(r"\d{4}/\d{2}/\d{2}(\s*\S\s*)\d{4}/\d{2}/\d{2}", old)
-    new = f"{y}/{m:02d}/01{sep.group(1) if sep else ' ~ '}{y}/{m:02d}/{last:02d}"
-    set_input_value(page, box, new)
+    pick_range(page, y, m, last, test)
     click_text(page, "表示する")
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(2000)
@@ -189,12 +214,10 @@ def get_product(page, y, m, out_dir):
     return path
 
 
-def get_payout(ctx, page, y, m, out_dir):
-    page.goto(PAYOUT_URL)
-    page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(1500)
+def get_payout(page, cfg, y, m, out_dir):
+    open_page(page, cfg, PAYOUT_URL)
     if not select_year_month(page, y, m):
-        page.goto(f"{PAYOUT_URL}?pullDownYearCdFrom={y}&pullDownMonthCdFrom={m}&search=検索")
+        open_page(page, cfg, f"{PAYOUT_URL}?pullDownYearCdFrom={y}&pullDownMonthCdFrom={m}&search=検索")
     else:
         click_text(page, "検索", exact=True)
     page.wait_for_load_state("networkidle")
@@ -254,10 +277,10 @@ def main():
             return 1
         ny, nm = next_month(y, m)
         steps = [
-            ("2_日別売上", lambda: get_daily(page, y, m, out_dir)),
-            ("3_商品別売上", lambda: get_product(page, y, m, out_dir)),
-            (f"4_振込明細_{m}月振込分", lambda: get_payout(ctx, page, y, m, out_dir)),
-            (f"5_振込明細_{nm}月振込分", lambda: get_payout(ctx, page, ny, nm, out_dir)),
+            ("2_日別売上", lambda: get_daily(page, cfg, y, m, out_dir)),
+            ("3_商品別売上", lambda: get_product(page, cfg, y, m, out_dir, test)),
+            (f"4_振込明細_{m}月振込分", lambda: get_payout(page, cfg, y, m, out_dir)),
+            (f"5_振込明細_{nm}月振込分", lambda: get_payout(page, cfg, ny, nm, out_dir)),
         ]
         for name, step in steps:
             try:
