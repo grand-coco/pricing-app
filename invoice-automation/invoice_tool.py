@@ -37,6 +37,9 @@ TOOL_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = TOOL_DIR / "config.ini"
 STATE_PATH = TOOL_DIR / "state.json"
 LOG_PATH = TOOL_DIR / "log.txt"
+LOCK_PATH = TOOL_DIR / "実行中.lock"
+ERROR_SHOWN_PATH = TOOL_DIR / "error_shown.json"
+AUTO = False  # 引数なし＝自動実行（毎日の時刻・サインイン・ロック解除）
 
 IMAP_HOST = "imap.mail.yahoo.co.jp"
 SMTP_HOST = "smtp.mail.yahoo.co.jp"
@@ -564,6 +567,22 @@ def ask(title, text, cancel=False):
 
 
 def notify(title, text, error=False):
+    if error and AUTO:
+        # 自動実行はロック解除のたびに動くので、同じエラーの表示は1日1回まで
+        key = f"{title}|{text.splitlines()[0] if text else ''}"
+        try:
+            shown = json.loads(ERROR_SHOWN_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            shown = {}
+        today = dt.date.today().isoformat()
+        if shown.get(key) == today:
+            return
+        shown = {k: d for k, d in shown.items() if d == today}
+        shown[key] = today
+        try:
+            ERROR_SHOWN_PATH.write_text(json.dumps(shown, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -583,6 +602,8 @@ def send_flow(cfg, state, force=False):
     if not force:
         if today.day < send_day or state.get("last_sent_month") == this_month:
             return
+        if state.get("postponed") == today.isoformat():
+            return  # 今日は「いいえ（明日もう一度）」が押されている
     # 送信日より前のテスト送信（--send-now）は「今月送った」と記録しない（20日の確認が出なくなるため）
     record = today.day >= send_day
 
@@ -602,6 +623,9 @@ def send_flow(cfg, state, force=False):
                 state["last_sent_month"] = this_month
             save_state(state)
             log(f"{label}: 請求書が0件のため、今月は送信しませんでした")
+        else:
+            state["postponed"] = today.isoformat()
+            save_state(state)
         return
 
     to_addr = cfg.get("税理士さん", "宛先")
@@ -643,6 +667,8 @@ def send_flow(cfg, state, force=False):
         return
     if answer is False:
         zip_path.unlink(missing_ok=True)
+        state["postponed"] = today.isoformat()
+        save_state(state)
         log(f"{label}: 送信を見送りました（明日もう一度確認します）")
         return
 
@@ -678,10 +704,63 @@ def send_flow(cfg, state, force=False):
 
 
 # ---------------------------------------------------------------- 入口
+def pid_alive(pid):
+    if os.name == "nt":
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def take_lock():
+    """同時に2つ動かないようにする（確認メッセージが2つ出ないように）。動いてよければ True"""
+    for _ in range(2):
+        try:
+            fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                pid = int(LOCK_PATH.read_text().strip() or 0)
+                age = dt.datetime.now().timestamp() - LOCK_PATH.stat().st_mtime
+            except (OSError, ValueError):
+                pid, age = 0, 0
+            if pid and pid_alive(pid) and age < 24 * 3600:
+                return False
+            LOCK_PATH.unlink(missing_ok=True)  # 前回の残り（途中で電源が切れた等）
+    return False
+
+
 def main():
-    global SHOW_BROWSER
+    global SHOW_BROWSER, AUTO
     args = sys.argv[1:]
     SHOW_BROWSER = "--show-browser" in args
+    AUTO = not args
+    if not take_lock():
+        if not AUTO:
+            print("請求書ツールがすでに動いています（確認メッセージが開いているかもしれません）。"
+                  "終わってからもう一度試してください。")
+        sys.exit(0)
+    try:
+        run(args)
+    finally:
+        LOCK_PATH.unlink(missing_ok=True)
+
+
+def run(args):
     try:
         cfg = load_config()
         state = load_state()

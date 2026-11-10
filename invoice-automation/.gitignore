@@ -4,3 +4,5 @@ log.txt
 請求書/
 error_screen.png
 __pycache__/
+実行中.lock
+error_shown.json
