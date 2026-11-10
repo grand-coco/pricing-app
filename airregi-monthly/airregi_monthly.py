@@ -6,7 +6,7 @@
 を加えて、税理士事務所へメール送信する。送信後、送ったファイルは「送付済」フォルダへ移す。
 
   python airregi_monthly.py            通常実行（確認画面を出して送信する）
-  pyw airregi_monthly.py --auto        自動起動用（毎日9時・サインイン時・ロック解除時にタスクから起動）。
+  pyw airregi_monthly.py --auto        自動起動用（毎日9時と、サインイン・ロック解除の5分後にタスクから起動）。
                                        送信日以降で先月分をまだ送っていないときだけ、確認画面を開く
   python airregi_monthly.py --test     送信せずにzipとメール下書き(.eml)だけ作る
   python airregi_monthly.py --check    ヤフーメールに接続できるか確認する

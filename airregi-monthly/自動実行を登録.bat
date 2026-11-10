@@ -5,7 +5,7 @@ schtasks /delete /tn "エアレジ月次送付" /f >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0register_task.ps1"
 if %errorlevel%==0 (
   echo 登録しました。
-  echo 毎日9時・Windowsへのサインイン時・ロック解除時に確認し、
+  echo 毎日9時と、Windowsへのサインイン・ロック解除の5分後に確認し、
   echo 10日以降で先月分をまだ送っていなければ、確認画面を出します。
 ) else if %errorlevel%==2 (
   echo 毎日9時の確認だけ登録しました（サインイン時・ロック解除時の登録は、このパソコンでは許可されませんでした）。
