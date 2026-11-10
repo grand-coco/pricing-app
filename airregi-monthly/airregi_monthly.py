@@ -5,7 +5,9 @@
   PayPay入金額と手数料（ヤフーメールの入金メールから作成）
 を加えて、税理士事務所へメール送信する。送信後、送ったファイルは「送付済」フォルダへ移す。
 
-  python airregi_monthly.py            通常実行（毎月10日にタスクから起動）
+  python airregi_monthly.py            通常実行（確認画面を出して送信する）
+  pyw airregi_monthly.py --auto        自動起動用（毎日9時・サインイン時・ロック解除時にタスクから起動）。
+                                       送信日以降で先月分をまだ送っていないときだけ、確認画面を開く
   python airregi_monthly.py --test     送信せずにzipとメール下書き(.eml)だけ作る
   python airregi_monthly.py --check    ヤフーメールに接続できるか確認する
 
@@ -16,10 +18,12 @@ import datetime as dt
 import email
 import email.policy
 import imaplib
+import os
 import re
 import shutil
 import smtplib
 import sys
+import time
 import unicodedata
 import zipfile
 from email.message import EmailMessage
@@ -31,6 +35,7 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill
 
 HERE = Path(__file__).resolve().parent
+LOCK = HERE / "実行中.lock"
 IMAP_HOST, SMTP_HOST = "imap.mail.yahoo.co.jp", "smtp.mail.yahoo.co.jp"
 CSV_ENC = "cp932"
 
@@ -252,6 +257,31 @@ def fetch_paypay(cfg, account, today, out_dir):
 
 # ---------- メール ----------
 
+def take_lock():
+    """確認画面が2つ開かないようにする。開けるときは True。3時間以上前の印は残骸とみなす。"""
+    for _ in range(2):
+        try:
+            os.close(os.open(LOCK, os.O_CREAT | os.O_EXCL))
+            return True
+        except FileExistsError:
+            if time.time() - LOCK.stat().st_mtime < 3 * 3600:
+                return False
+            LOCK.unlink(missing_ok=True)
+    return False
+
+
+def auto_check(cfg, today):
+    """送る必要があるときだけ「今すぐ送信.bat」を開く。何もないときは画面を出さずに終わる。"""
+    send_day = int(cfg["メール"].get("送信日", "10"))
+    if today.day < send_day:
+        return
+    last = today.replace(day=1) - dt.timedelta(days=1)
+    sent = Path(cfg["フォルダ"]["格納先"].strip()) / "送付済" / f"{last.year}年{last.month}月"
+    if sent.exists() or not take_lock():
+        return
+    os.startfile(HERE / "今すぐ送信.bat")
+
+
 def build_mail(cfg, sender, year, month, zip_path):
     mc = cfg["メール"]
     msg = EmailMessage()
@@ -387,8 +417,15 @@ class Tee:
 
 
 if __name__ == "__main__":
+    if "--auto" in sys.argv:  # 画面なし（pyw）で起動されるので、何も表示しない
+        auto_check(load_config(), dt.date.today())
+        sys.exit(0)
     import traceback
     code = 0
+    sending = "--test" not in sys.argv and "--check" not in sys.argv
+    if sending:
+        take_lock()  # 自動起動で開いた場合は、もう印がついている
+        LOCK.touch()
     with open(HERE / "実行結果.txt", "w", encoding="utf-8-sig") as log:
         sys.stdout = Tee(sys.__stdout__, log)
         sys.stderr = Tee(sys.__stderr__, log)
@@ -403,4 +440,6 @@ if __name__ == "__main__":
             code = 1
         finally:
             sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+            if sending:
+                LOCK.unlink(missing_ok=True)
     sys.exit(code)
